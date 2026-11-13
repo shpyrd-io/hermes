@@ -22,7 +22,7 @@ import (
 
 func main() {
 	log.SetFlags(0)
-	home := envOr("HERMES_HOME", "/opt/data")
+	home := envOr("HERMES_HOME", "/opt/data/hermes")
 	port := envOr("PORT", "8080")
 	dash := envOr("HERMES_DASHBOARD_PORT", "9119")
 	if _, err := strconv.Atoi(dash); err != nil {
@@ -30,6 +30,9 @@ func main() {
 	}
 	if os.Getpid() == 1 && os.Getenv("HERMES_SETUP_INIT") == "" {
 		os.Exit(runAsInit())
+	}
+	if err := prepareHome(home); err != nil {
+		log.Fatalf("hermes-setup: %v", err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()

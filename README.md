@@ -28,9 +28,11 @@ own. Do not set the project's access to public.
 ## How it runs
 
 `hermes-setup` (this repository, Go, no dependencies) is the container's
-process. It listens on `$PORT` and:
+process. Hermes' home is `/opt/data/hermes`, a directory the program makes
+inside the project's disk: the disk's root belongs to root, and Hermes
+refuses a home it does not own. The program listens on `$PORT` and:
 
-- until `/opt/data/.shpyrd/setup.json` exists, shows the setup and
+- until `/opt/data/hermes/.shpyrd/setup.json` exists, shows the setup and
   redirects everything else to it;
 - writes the choice through `hermes config set` (provider and model to
   `config.yaml`, the key to `.env`, as Hermes itself does);
