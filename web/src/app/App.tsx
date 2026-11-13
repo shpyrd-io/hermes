@@ -40,6 +40,10 @@ export default function App() {
   const [state, setState] = useState<State | null>(null);
   const [failed, setFailed] = useState("");
   const [editing, setEditing] = useState(false);
+  // Opening Hermes as soon as it answers: after a Finish, or when the door
+  // sent the page here because the dashboard was down (?starting). A visit
+  // to /setup itself stays here, to change the provider or model.
+  const [starting, setStarting] = useState(() => new URLSearchParams(window.location.search).has("starting"));
 
   useEffect(() => {
     call<State>("/setup/api/state").then(setState).catch((e: Error) => setFailed(e.message));
@@ -56,8 +60,8 @@ export default function App() {
     );
   }
   if (!state) return <Page><p className="text-muted-foreground">Loading…</p></Page>;
-  if (state.configured && !editing) return <Starting state={state} onEdit={() => setEditing(true)} />;
-  return <Setup state={state} onDone={(s) => { setState(s); setEditing(false); }} />;
+  if (state.configured && !editing) return <Starting state={state} starting={starting} onEdit={() => setEditing(true)} />;
+  return <Setup state={state} onDone={(s) => { setState(s); setEditing(false); setStarting(true); }} />;
 }
 
 function Page({ children }: { children: React.ReactNode }) {
@@ -67,30 +71,36 @@ function Page({ children }: { children: React.ReactNode }) {
 // Starting: Hermes is set up and its dashboard is being waited for. The
 // state is read again every few seconds; when the dashboard answers, the
 // address is Hermes.
-function Starting({ state, onEdit }: { state: State; onEdit: () => void }) {
+function Starting({ state, starting, onEdit }: { state: State; starting: boolean; onEdit: () => void }) {
   const [ready, setReady] = useState(state.dashboardReady);
   useEffect(() => {
     if (ready) {
-      window.location.assign("/");
+      if (starting) window.location.assign("/");
       return;
     }
     const t = window.setInterval(() => {
       call<State>("/setup/api/state").then((s) => { if (s.dashboardReady) setReady(true); }).catch(() => {});
     }, 3000);
     return () => window.clearInterval(t);
-  }, [ready]);
+  }, [ready, starting]);
+  const title = !ready ? "Hermes is starting" : starting ? "Opening Hermes" : "Hermes is set up";
+  const description = !ready
+    ? "The dashboard is not answering yet. This page tries again every few seconds."
+    : starting
+      ? "The dashboard answers; opening it."
+      : "The dashboard answers at the project's address.";
   return (
     <Page>
       <Stack gap="spacious">
-        <PageHeading
-          title={ready ? "Opening Hermes" : "Hermes is starting"}
-          description={ready ? "The dashboard answers; opening it." : "The dashboard is not answering yet. This page tries again every few seconds."}
-        />
+        <PageHeading title={title} description={description} />
         <Card>
           <CardContent>
             <Stack gap="cozy">
               <p>Hermes is set up with <strong>{state.provider}</strong> and the model <strong>{state.model}</strong>.</p>
-              <div><Button variant="secondary" onClick={onEdit}>Change the provider or model</Button></div>
+              <Stack direction="horizontal" gap="cozy">
+                {ready && !starting && <Button asChild><a href="/">Open Hermes</a></Button>}
+                <Button variant="secondary" onClick={onEdit}>Change the provider or model</Button>
+              </Stack>
             </Stack>
           </CardContent>
         </Card>

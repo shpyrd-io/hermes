@@ -403,7 +403,7 @@ func TestTheDoorSendsToTheSetupWhileTheDashboardIsDown(t *testing.T) {
 	r.setUp()
 	r.dash.Close() // nobody on the dashboard's port
 	status, _, hdr := r.get("/")
-	if status != http.StatusSeeOther || hdr.Get("Location") != "/setup" {
+	if status != http.StatusSeeOther || hdr.Get("Location") != "/setup?starting" {
 		t.Fatalf("%d %q", status, hdr.Get("Location"))
 	}
 	if st := r.state(); st["configured"] != true || st["dashboardReady"] != false {

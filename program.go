@@ -200,11 +200,16 @@ func (p *Program) door(w http.ResponseWriter, r *http.Request) {
 	p.proxy.ServeHTTP(w, r)
 }
 
-// toSetup sends a page to the setup; a program's request gets the
-// answer in words instead.
+// toSetup sends a page to the setup, which opens Hermes by itself once
+// the dashboard answers when the setup was done already; a program's
+// request gets the answer in words instead.
 func (p *Program) toSetup(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html") {
-		http.Redirect(w, r, webPrefix, http.StatusSeeOther)
+		to := webPrefix
+		if _, ok := p.current(); ok {
+			to += "?starting"
+		}
+		http.Redirect(w, r, to, http.StatusSeeOther)
 		return
 	}
 	w.Header().Set("Retry-After", "3")
