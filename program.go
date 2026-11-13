@@ -3,12 +3,10 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"log"
 	"net"
 	"net/http"
@@ -22,12 +20,9 @@ import (
 	"time"
 )
 
-//go:embed templates/*.html
-var templates embed.FS
-
 // Options of a Program; the zero values are the container's.
 type Options struct {
-	Home         string            // Hermes' home, the volume
+	Home         string            // Hermes' home, inside the volume
 	Hermes       string            // the hermes binary
 	Dashboard    string            // the dashboard's address on loopback
 	DashboardArg []string          // how the dashboard is started
@@ -42,9 +37,9 @@ type Options struct {
 // Program is the setup screen and, once set up, the door to the dashboard.
 type Program struct {
 	o     Options
-	tmpl  *template.Template
 	proxy *httputil.ReverseProxy
 	dash  *url.URL
+	web   http.Handler
 
 	mu      sync.Mutex
 	pending map[string]*pending
@@ -95,8 +90,7 @@ func New(o Options) *Program {
 	if err != nil {
 		panic(err)
 	}
-	p := &Program{o: o, dash: dash, pending: map[string]*pending{}}
-	p.tmpl = template.Must(template.ParseFS(templates, "templates/*.html"))
+	p := &Program{o: o, dash: dash, pending: map[string]*pending{}, web: webHandler()}
 	p.proxy = &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(dash)
@@ -133,9 +127,11 @@ func crossSite(r *http.Request) bool {
 // Handler serves the setup and the dashboard.
 func (p *Program) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /setup", p.form)
-	mux.HandleFunc("POST /setup/check", p.check)
-	mux.HandleFunc("POST /setup/apply", p.apply)
+	mux.HandleFunc("GET "+webPrefix+"/api/state", p.state)
+	mux.HandleFunc("POST "+webPrefix+"/api/check", p.check)
+	mux.HandleFunc("POST "+webPrefix+"/api/apply", p.apply)
+	mux.Handle(webPrefix, p.web)
+	mux.Handle(webPrefix+"/", p.web)
 	mux.HandleFunc("/", p.door)
 	return mux
 }
@@ -179,10 +175,21 @@ func (p *Program) ensureChildren() {
 	p.o.Children.Ensure("gateway", p.o.GatewayArg)
 }
 
-// door is every path but the setup's: the dashboard once set up.
+// dashboardUp says whether something listens at the dashboard's address.
+func (p *Program) dashboardUp() bool {
+	c, err := net.DialTimeout("tcp", p.dash.Host, 300*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	c.Close()
+	return true
+}
+
+// door is every path but the setup's: the dashboard once set up and
+// answering, the setup page otherwise.
 func (p *Program) door(w http.ResponseWriter, r *http.Request) {
 	if _, ok := p.current(); !ok {
-		http.Redirect(w, r, "/setup", http.StatusSeeOther)
+		p.toSetup(w, r)
 		return
 	}
 	if crossSite(r) {
@@ -193,62 +200,85 @@ func (p *Program) door(w http.ResponseWriter, r *http.Request) {
 	p.proxy.ServeHTTP(w, r)
 }
 
-// notUp is the dashboard not answering yet: a page that tries again.
+// toSetup sends a page to the setup; a program's request gets the
+// answer in words instead.
+func (p *Program) toSetup(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html") {
+		http.Redirect(w, r, webPrefix, http.StatusSeeOther)
+		return
+	}
+	w.Header().Set("Retry-After", "3")
+	http.Error(w, "Hermes is not set up or not answering yet; open "+webPrefix, http.StatusServiceUnavailable)
+}
+
+// notUp is the dashboard not answering: the setup page says so and tries
+// again until it does.
 func (p *Program) notUp(w http.ResponseWriter, r *http.Request, err error) {
 	var opErr *net.OpError
 	if !errors.As(err, &opErr) {
 		log.Printf("hermes-setup: dashboard: %v", err)
 	}
-	w.Header().Set("Refresh", "3")
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusServiceUnavailable)
-	_ = p.tmpl.ExecuteTemplate(w, "starting.html", nil)
+	p.toSetup(w, r)
 }
 
-type formData struct {
-	Providers  []provider
-	Provider   string
-	Base       string
-	InstallKey bool // an OpenRouter key came with the install
-	Error      string
-	Done       *setup
-	// step two
-	Token  string
-	Models []string
-	Name   string
-	Chosen string
-}
-
-func (p *Program) render(w http.ResponseWriter, status int, d formData) {
-	d.Providers = providers
-	if d.Provider == "" {
-		d.Provider = "openrouter"
-	}
-	d.InstallKey = p.o.InstallKey != ""
-	if s, ok := p.current(); ok {
-		d.Done = &s
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
-	if err := p.tmpl.ExecuteTemplate(w, "setup.html", d); err != nil {
-		log.Printf("hermes-setup: render: %v", err)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func readJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	return json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(v)
+}
+
+type providerView struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	KeysAt string `json:"keysAt"`
+	Custom bool   `json:"custom"`
+}
+
+type stateView struct {
+	Configured     bool           `json:"configured"`
+	Provider       string         `json:"provider,omitempty"`
+	Model          string         `json:"model,omitempty"`
+	InstallKey     bool           `json:"installKey"`
+	Providers      []providerView `json:"providers"`
+	DashboardReady bool           `json:"dashboardReady"`
+}
+
+func (p *Program) stateView() stateView {
+	v := stateView{InstallKey: p.o.InstallKey != ""}
+	for _, pr := range providers {
+		v.Providers = append(v.Providers, providerView{ID: pr.ID, Name: pr.Name, KeysAt: pr.KeysAt, Custom: pr.ID == "custom"})
 	}
+	if s, ok := p.current(); ok {
+		v.Configured, v.Provider, v.Model = true, s.Provider, s.Model
+		v.DashboardReady = p.dashboardUp()
+	}
+	return v
 }
 
-func (p *Program) form(w http.ResponseWriter, r *http.Request) {
-	p.render(w, http.StatusOK, formData{})
+// state says what is set up and whether the dashboard answers.
+func (p *Program) state(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, p.stateView())
 }
 
-// check tests the key against the provider and shows its models.
+// check tests the key against the provider and lists its models.
 func (p *Program) check(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
+	var in struct{ Provider, Key, Base string }
+	if err := readJSON(w, r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, "The request could not be read.")
 		return
 	}
-	prov, ok := providerByID(r.Form.Get("provider"))
+	prov, ok := providerByID(in.Provider)
 	if !ok {
-		p.render(w, http.StatusBadRequest, formData{Error: "Choose a provider."})
+		writeError(w, http.StatusBadRequest, "Choose a provider.")
 		return
 	}
 	base := prov.Base
@@ -256,19 +286,19 @@ func (p *Program) check(w http.ResponseWriter, r *http.Request) {
 		base = b
 	}
 	if prov.ID == "custom" {
-		base = strings.TrimRight(strings.TrimSpace(r.Form.Get("base")), "/")
+		base = strings.TrimRight(strings.TrimSpace(in.Base), "/")
 		if u, err := url.Parse(base); err != nil || u.Scheme == "" || u.Host == "" {
-			p.render(w, http.StatusUnprocessableEntity, formData{Provider: prov.ID, Base: base, Error: "The server's address needs to be a full URL, like https://llm.example.com/v1."})
+			writeError(w, http.StatusUnprocessableEntity, "The server's address needs to be a full URL, like https://llm.example.com/v1.")
 			return
 		}
 	}
-	key := strings.TrimSpace(r.Form.Get("key"))
+	key := strings.TrimSpace(in.Key)
 	fromEnv := false
 	if key == "" && prov.ID == "openrouter" && p.o.InstallKey != "" {
 		key, fromEnv = p.o.InstallKey, true
 	}
 	if key == "" && prov.ID != "custom" {
-		p.render(w, http.StatusUnprocessableEntity, formData{Provider: prov.ID, Error: "The key is needed."})
+		writeError(w, http.StatusUnprocessableEntity, "The key is needed.")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
@@ -279,11 +309,11 @@ func (p *Program) check(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errRefused) {
 			msg = prov.Name + " refused the key. Check it at " + prov.KeysAt + "."
 		}
-		p.render(w, http.StatusUnprocessableEntity, formData{Provider: prov.ID, Base: base, Error: msg})
+		writeError(w, http.StatusUnprocessableEntity, msg)
 		return
 	}
 	if len(models) == 0 {
-		p.render(w, http.StatusUnprocessableEntity, formData{Provider: prov.ID, Base: base, Error: "The key works, but " + prov.Name + " lists no models for it."})
+		writeError(w, http.StatusUnprocessableEntity, "The key works, but "+prov.Name+" lists no models for it.")
 		return
 	}
 	tok := p.remember(&pending{Provider: prov, Base: base, Key: key, FromEnv: fromEnv, Models: models, Made: p.o.Now()})
@@ -291,7 +321,7 @@ func (p *Program) check(w http.ResponseWriter, r *http.Request) {
 	if s, ok := p.current(); ok && s.Provider == prov.ID {
 		chosen = s.Model
 	}
-	p.render(w, http.StatusOK, formData{Provider: prov.ID, Base: base, Token: tok, Models: models, Name: prov.Name, Chosen: chosen})
+	writeJSON(w, http.StatusOK, map[string]any{"token": tok, "name": prov.Name, "models": models, "chosen": chosen})
 }
 
 func (p *Program) remember(pd *pending) string {
@@ -317,19 +347,26 @@ func (p *Program) take(tok string) *pending {
 	return pd
 }
 
+func (p *Program) keep(tok string, pd *pending) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.pending[tok] = pd
+}
+
 // apply writes the choice through Hermes' own config command and starts
-// Hermes.
+// Hermes, or restarts the gateway, which reads the model at start.
 func (p *Program) apply(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "bad form", http.StatusBadRequest)
+	var in struct{ Token, Model string }
+	if err := readJSON(w, r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, "The request could not be read.")
 		return
 	}
-	pd := p.take(r.Form.Get("token"))
+	pd := p.take(in.Token)
 	if pd == nil {
-		p.render(w, http.StatusUnprocessableEntity, formData{Error: "That check has expired. Enter the key again."})
+		writeError(w, http.StatusUnprocessableEntity, "That check has expired. Enter the key again.")
 		return
 	}
-	model := strings.TrimSpace(r.Form.Get("model"))
+	model := strings.TrimSpace(in.Model)
 	known := false
 	for _, m := range pd.Models {
 		if m == model {
@@ -338,8 +375,8 @@ func (p *Program) apply(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !known {
-		tok := p.remember(pd)
-		p.render(w, http.StatusUnprocessableEntity, formData{Provider: pd.Provider.ID, Base: pd.Base, Token: tok, Models: pd.Models, Name: pd.Provider.Name, Error: "Choose one of the models listed."})
+		p.keep(in.Token, pd) // the choice can be made again
+		writeError(w, http.StatusUnprocessableEntity, "Choose one of the models listed.")
 		return
 	}
 	sets := [][2]string{{"model.provider", pd.Provider.ID}, {"model.default", model}}
@@ -354,8 +391,8 @@ func (p *Program) apply(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, kv := range sets {
 		if err := p.hermes(r.Context(), "config", "set", kv[0], kv[1]); err != nil {
-			tok := p.remember(pd)
-			p.render(w, http.StatusInternalServerError, formData{Provider: pd.Provider.ID, Base: pd.Base, Token: tok, Models: pd.Models, Name: pd.Provider.Name, Error: err.Error()})
+			p.keep(in.Token, pd)
+			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 	}
@@ -368,7 +405,7 @@ func (p *Program) apply(w http.ResponseWriter, r *http.Request) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err == nil {
 		err = os.WriteFile(path, b, 0o644)
 		if err != nil {
-			p.render(w, http.StatusInternalServerError, formData{Error: "Hermes is configured, but the setup could not be recorded: " + err.Error()})
+			writeError(w, http.StatusInternalServerError, "Hermes is configured, but the setup could not be recorded: "+err.Error())
 			return
 		}
 	}
@@ -384,7 +421,7 @@ func (p *Program) apply(w http.ResponseWriter, r *http.Request) {
 		p.o.Children.Restart("gateway")
 	}
 	p.ensureChildren()
-	http.Redirect(w, r, "/", http.StatusSeeOther)
+	writeJSON(w, http.StatusOK, p.stateView())
 }
 
 // hermes runs one hermes command in the home, and says what it said when

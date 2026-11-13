@@ -28,7 +28,10 @@ own. Do not set the project's access to public.
 ## How it runs
 
 `hermes-setup` (this repository, Go, no dependencies) is the container's
-process. Hermes' home is `/opt/data/hermes`, a directory the program makes
+process. The setup page is `web/`, a Next application on the shpyrd
+design system (`@shpyrd/ui`), compiled to static files under `/setup`
+and embedded in the program; the program answers its API under
+`/setup/api`. Hermes' home is `/opt/data/hermes`, a directory the program makes
 inside the project's disk: the disk's root belongs to root, and Hermes
 refuses a home it does not own. The program listens on `$PORT` and:
 
@@ -56,6 +59,7 @@ push to main is built and released on the projects that follow it.
 
 ## Developing
 
+    (cd web && npm ci && npm run build)   # the page, embedded by the program
     go test ./...
     docker build -t hermes-shpyrd .
     docker run --rm -p 8080:8080 -v hermes-data:/opt/data hermes-shpyrd

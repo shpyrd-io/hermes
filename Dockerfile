@@ -2,10 +2,20 @@
 # front of the dashboard. The platform injects PORT and mounts the data
 # volume at /opt/data, Hermes' home.
 
+# The setup page: a Next application on the shpyrd design system,
+# compiled to static files the Go program embeds.
+FROM node:24-alpine AS web
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web ./
+RUN npm run build
+
 FROM golang:1.27-alpine AS build
 WORKDIR /src
 COPY go.mod ./
 COPY . .
+COPY --from=web /src/web/out ./web/out
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/hermes-setup .
 
 # The Hermes release. Bumping this tag is how Hermes is updated.
