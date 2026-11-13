@@ -40,6 +40,10 @@ process. It listens on `$PORT` and:
 - restarts the gateway three quiet seconds after `.env` or `config.yaml`
   change, whoever changed them: the gateway reads them at start.
 
+As PID 1 the program first runs itself again as a child and stays as its
+init: it waits for the processes Hermes leaves behind, while the program
+waits for its own children only.
+
 Hermes' own supervisor, s6, is not used: the platform runs the image as
 the hermes user with no way to root, and s6's bootstrap wants root.
 

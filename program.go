@@ -145,6 +145,15 @@ func (p *Program) Handler() http.Handler {
 func (p *Program) Start(ctx context.Context) {
 	if _, ok := p.current(); ok {
 		p.ensureChildren()
+	} else {
+		// Hermes' first command in a fresh home seeds its files and checks
+		// its install, a minute's work: done now, not when the person
+		// presses Finish.
+		go func() {
+			if err := p.hermes(ctx, "config", "get", "model"); err != nil {
+				log.Printf("hermes-setup: warming Hermes' home: %v", err)
+			}
+		}()
 	}
 	go p.watch(ctx)
 }
@@ -410,9 +419,9 @@ func (p *Program) apply(w http.ResponseWriter, r *http.Request) {
 }
 
 // hermes runs one hermes command in the home, and says what it said when
-// it fails.
+// it fails. The first commands in a fresh home take a while.
 func (p *Program) hermes(ctx context.Context, args ...string) error {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, p.o.Hermes, args...)
 	cmd.Dir = p.o.Home
