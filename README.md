@@ -9,7 +9,7 @@ dashboard.
 ## What the person sees
 
 1. The project is installed from the templates. Nothing is asked but a
-   name; an OpenRouter key may be given, optionally.
+   name.
 2. The first visit shows **Set up Hermes**: a provider (OpenRouter,
    Anthropic, or any OpenAI-compatible server), the key, then the model,
    chosen from the list the provider answers with for that key.
