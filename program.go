@@ -101,10 +101,33 @@ func New(o Options) *Program {
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(dash)
 			r.SetXForwarded()
+			// The dashboard, bound to loopback with no login of its own,
+			// trusts only loopback origins: a browser's Origin at the
+			// project's address would be refused, websockets first. The
+			// door checked that the Origin is the project's own (see
+			// crossSite), so the dashboard is told the proxy's.
+			if r.In.Header.Get("Origin") != "" {
+				r.Out.Header.Set("Origin", dash.Scheme+"://"+dash.Host)
+			}
 		},
 		ErrorHandler: p.notUp,
 	}
 	return p
+}
+
+// crossSite says whether a request with an Origin header comes from a page
+// that is not the project's own: the check the dashboard would make, kept
+// here because the proxy rewrites the Origin.
+func crossSite(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" || origin == "null" {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" {
+		return true
+	}
+	return !strings.EqualFold(u.Host, r.Host)
 }
 
 // Handler serves the setup and the dashboard.
@@ -192,6 +215,10 @@ func (p *Program) watch(ctx context.Context) {
 func (p *Program) door(w http.ResponseWriter, r *http.Request) {
 	if _, ok := p.current(); !ok {
 		http.Redirect(w, r, "/setup", http.StatusSeeOther)
+		return
+	}
+	if crossSite(r) {
+		http.Error(w, "a request from another site is refused", http.StatusForbidden)
 		return
 	}
 	p.ensureChildren()

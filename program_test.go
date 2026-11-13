@@ -99,7 +99,7 @@ func newRig(t *testing.T, opts Options) *rig {
 	ch := &fakeChildren{}
 	opts.Children = ch
 	dash := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "dashboard "+r.URL.Path+" via "+r.Header.Get("X-Forwarded-Host"))
+		io.WriteString(w, "dashboard "+r.URL.Path+" via "+r.Header.Get("X-Forwarded-Host")+" origin "+r.Header.Get("Origin"))
 	}))
 	t.Cleanup(dash.Close)
 	opts.Dashboard = dash.URL
@@ -305,6 +305,39 @@ func TestAnExpiredTokenAsksAgain(t *testing.T) {
 	status, body, _ := r.post("/setup/apply", url.Values{"token": {"nope"}, "model": {"x"}})
 	if status != http.StatusUnprocessableEntity || !strings.Contains(body, "expired") {
 		t.Fatalf("%d %q", status, body)
+	}
+}
+
+func TestTheDashboardSeesTheProxysOriginAndOtherSitesAreRefused(t *testing.T) {
+	r := newRig(t, Options{})
+	_ = os.MkdirAll(filepath.Join(r.home, ".shpyrd"), 0o755)
+	_ = os.WriteFile(filepath.Join(r.home, setupFile), []byte(`{"provider":"openrouter","model":"m"}`), 0o644)
+	own := strings.TrimPrefix(r.srv.URL, "http://")
+	for _, c := range []struct {
+		origin string
+		status int
+		want   string
+	}{
+		{"", 200, "origin \n"},
+		{"http://" + own, 200, "origin " + r.dash.URL},
+		{"http://" + strings.ToUpper(own), 200, "origin " + r.dash.URL},
+		{"null", 200, "origin " + r.dash.URL},
+		{"https://evil.example", 403, "another site"},
+		{"garbage", 403, "another site"},
+	} {
+		req, _ := http.NewRequest(http.MethodPost, r.srv.URL+"/api/ws", nil)
+		if c.origin != "" {
+			req.Header.Set("Origin", c.origin)
+		}
+		res, err := r.client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		if res.StatusCode != c.status || !strings.Contains(string(b)+"\n", c.want) {
+			t.Errorf("origin %q: %d %q, want %d containing %q", c.origin, res.StatusCode, b, c.status, c.want)
+		}
 	}
 }
 
