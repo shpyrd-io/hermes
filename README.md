@@ -36,9 +36,9 @@ process. It listens on `$PORT` and:
   `config.yaml`, the key to `.env`, as Hermes itself does);
 - then runs `hermes dashboard` on 127.0.0.1:9119 and `hermes gateway run`
   as children, starting them again when they exit, and proxies to the
-  dashboard;
-- restarts the gateway three quiet seconds after `.env` or `config.yaml`
-  change, whoever changed them: the gateway reads them at start.
+  dashboard. A setup run again restarts the gateway, which reads the
+  model at start; channels added later are picked up by the dashboard's
+  own **Restart gateway**, as in any Hermes.
 
 As PID 1 the program first runs itself again as a child and stays as its
 init: it waits for the processes Hermes leaves behind, while the program

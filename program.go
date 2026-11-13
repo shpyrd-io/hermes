@@ -140,8 +140,7 @@ func (p *Program) Handler() http.Handler {
 	return mux
 }
 
-// Start runs the children when the setup was done before, and watches
-// Hermes' files to restart the gateway when they change.
+// Start runs the children when the setup was done before.
 func (p *Program) Start(ctx context.Context) {
 	if _, ok := p.current(); ok {
 		p.ensureChildren()
@@ -155,7 +154,6 @@ func (p *Program) Start(ctx context.Context) {
 			}
 		}()
 	}
-	go p.watch(ctx)
 }
 
 func (p *Program) current() (setup, bool) {
@@ -179,45 +177,6 @@ func (p *Program) ensureChildren() {
 	p.running = true
 	p.o.Children.Ensure("dashboard", p.o.DashboardArg)
 	p.o.Children.Ensure("gateway", p.o.GatewayArg)
-}
-
-// watch restarts the gateway three quiet seconds after .env or config.yaml
-// changed, by the setup, the dashboard's pages or a shell: the gateway
-// reads them at start.
-func (p *Program) watch(ctx context.Context) {
-	files := []string{filepath.Join(p.o.Home, ".env"), filepath.Join(p.o.Home, "config.yaml")}
-	stamp := func() string {
-		var b strings.Builder
-		for _, f := range files {
-			if st, err := os.Stat(f); err == nil {
-				fmt.Fprintf(&b, "%s:%d:%d;", f, st.ModTime().UnixNano(), st.Size())
-			}
-		}
-		return b.String()
-	}
-	last := stamp()
-	var changedAt time.Time
-	t := time.NewTicker(time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-		}
-		if now := stamp(); now != last {
-			last, changedAt = now, p.o.Now()
-			continue
-		}
-		p.mu.Lock()
-		running := p.running
-		p.mu.Unlock()
-		if !changedAt.IsZero() && running && p.o.Now().Sub(changedAt) >= 3*time.Second {
-			changedAt = time.Time{}
-			log.Printf("hermes-setup: Hermes' files changed, restarting the gateway")
-			p.o.Children.Restart("gateway")
-		}
-	}
 }
 
 // door is every path but the setup's: the dashboard once set up.
@@ -414,6 +373,16 @@ func (p *Program) apply(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	log.Printf("hermes-setup: set up with %s, model %s", pd.Provider.Name, model)
+	p.mu.Lock()
+	running := p.running
+	p.mu.Unlock()
+	if running {
+		// The gateway reads the model at start. The channels and the rest
+		// of Hermes' files are left to Hermes' own restart button: the
+		// gateway writes those files itself at start, so a restart on
+		// every change was a restart loop.
+		p.o.Children.Restart("gateway")
+	}
 	p.ensureChildren()
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }

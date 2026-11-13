@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 )
 
 // fakeChildren records what the program asked for.
@@ -366,40 +365,27 @@ func TestStartRunsTheChildrenWhenSetUpBefore(t *testing.T) {
 	}
 }
 
-func TestAChangedEnvRestartsTheGatewayAfterAQuietMoment(t *testing.T) {
-	r := newRig(t, Options{})
-	now := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
-	var mu sync.Mutex
-	r.p.o.Now = func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
-	_ = os.MkdirAll(filepath.Join(r.home, ".shpyrd"), 0o755)
-	_ = os.WriteFile(filepath.Join(r.home, setupFile), []byte(`{"provider":"openrouter","model":"m"}`), 0o644)
-	_ = os.WriteFile(filepath.Join(r.home, ".env"), []byte("A=1\n"), 0o600)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	r.p.Start(ctx)
-	time.Sleep(1500 * time.Millisecond)
-	_ = os.WriteFile(filepath.Join(r.home, ".env"), []byte("A=1\nTELEGRAM_BOT_TOKEN=t\n"), 0o600)
-	time.Sleep(1500 * time.Millisecond)
-	r.children.mu.Lock()
-	early := len(r.children.restarts)
-	r.children.mu.Unlock()
-	if early != 0 {
-		t.Fatal("restarted before the quiet moment")
+func TestASecondSetupRestartsTheGateway(t *testing.T) {
+	ms := modelsServer(t, "k", "a/one", "a/two")
+	defer ms.Close()
+	r := newRig(t, Options{Bases: map[string]string{"openrouter": ms.URL}})
+	finish := func(model string) {
+		t.Helper()
+		_, body, _ := r.post("/setup/check", url.Values{"provider": {"openrouter"}, "key": {"k"}})
+		m := tokenRe.FindStringSubmatch(body)
+		if m == nil {
+			t.Fatalf("no token: %q", body)
+		}
+		if status, body, _ := r.post("/setup/apply", url.Values{"token": {m[1]}, "model": {model}}); status != http.StatusSeeOther {
+			t.Fatalf("apply: %d %q", status, body)
+		}
 	}
-	mu.Lock()
-	now = now.Add(5 * time.Second)
-	mu.Unlock()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		r.children.mu.Lock()
-		n := len(r.children.restarts)
-		r.children.mu.Unlock()
-		if n == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("gateway restarts: %d, want 1", n)
-		}
-		time.Sleep(100 * time.Millisecond)
+	finish("a/one")
+	if len(r.children.restarts) != 0 {
+		t.Fatalf("the first setup starts the gateway, it does not restart it: %v", r.children.restarts)
+	}
+	finish("a/two")
+	if got := strings.Join(r.children.restarts, ","); got != "gateway" {
+		t.Fatalf("restarts after the second setup: %q", got)
 	}
 }
