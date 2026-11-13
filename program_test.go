@@ -186,6 +186,11 @@ func TestBeforeSetupEveryPageIsTheSetup(t *testing.T) {
 	if res.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("a program's request: %d", res.StatusCode)
 	}
+	// The platform's health check, a plain GET of /, finds the door up.
+	res, _ = r.client.Get(r.srv.URL + "/")
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("the health check: %d", res.StatusCode)
+	}
 	st := r.state()
 	if st["configured"] != false || len(st["providers"].([]any)) != 3 {
 		t.Fatalf("state: %v", st)

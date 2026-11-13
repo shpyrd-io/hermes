@@ -201,9 +201,12 @@ func (p *Program) door(w http.ResponseWriter, r *http.Request) {
 }
 
 // toSetup sends a page to the setup, which opens Hermes by itself once
-// the dashboard answers when the setup was done already; a program's
-// request gets the answer in words instead.
+// the dashboard answers when the setup was done already. The platform's
+// health checks, a plain GET of /, are told the door is up: the project
+// is healthy while it waits to be set up. Any other program's request
+// gets the answer in words.
 func (p *Program) toSetup(w http.ResponseWriter, r *http.Request) {
+	msg := "Hermes is not set up or not answering yet; open " + webPrefix
 	if r.Method == http.MethodGet && strings.Contains(r.Header.Get("Accept"), "text/html") {
 		to := webPrefix
 		if _, ok := p.current(); ok {
@@ -212,8 +215,13 @@ func (p *Program) toSetup(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, to, http.StatusSeeOther)
 		return
 	}
+	if (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path == "/" {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte(msg + "\n"))
+		return
+	}
 	w.Header().Set("Retry-After", "3")
-	http.Error(w, "Hermes is not set up or not answering yet; open "+webPrefix, http.StatusServiceUnavailable)
+	http.Error(w, msg, http.StatusServiceUnavailable)
 }
 
 // notUp is the dashboard not answering: the setup page says so and tries
